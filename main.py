@@ -9,19 +9,22 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
-# --- RECURSOS PARA RENDER (512MB RAM) ---
 executor = ThreadPoolExecutor(max_workers=5)
 extraction_semaphore = asyncio.Semaphore(3)
 
 UA_GLOBAL = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
 
 async def stream_video(url: str, headers: dict, cookies: dict) -> AsyncGenerator[bytes, None]:
+    # Limpieza de headers para evitar que el CDN de IG nos detecte
+    headers.pop('Host', None)
+    headers.pop('host', None)
+    
     limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
-    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True, limits=limits, cookies=cookies) as client:
+    # verify=False ayuda a que httpx no se bloquee con los certificados de FB/IG
+    async with httpx.AsyncClient(timeout=120.0, follow_redirects=True, limits=limits, cookies=cookies, verify=False) as client:
         try:
             async with client.stream("GET", url, headers=headers) as response:
                 if response.status_code not in (200, 206):
-                    print(f"❌ Error CDN: {response.status_code}")
                     return
                 async for chunk in response.aiter_bytes(chunk_size=128 * 1024):
                     yield chunk
@@ -36,14 +39,7 @@ def extraer_info(url: str):
         'cachedir': False,
         'no_check_certificate': True,
         'user_agent': UA_GLOBAL,
-        'http_headers': {
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        },
-        'extractor_args': {
-            'tiktok': {
-                'web_id': f'734{random.randint(100000000, 999999999)}'
-            }
-        }
+        'extractor_args': {'tiktok': {'web_id': f'734{random.randint(100000000, 999999999)}'}}
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=False)
@@ -62,10 +58,7 @@ async def descargar(url: str = Query(...)):
             is_tk = 'tiktok.com' in url.lower()
 
             if 'formats' in info:
-                # --- FILTRADO POR DOMINIO ---
-                blacklist = ['watermark', 'download', 'lite', 'fixed', 'tier', 'watermark_fixed', 'fallback', 'small', 'medium']
-                
-                # Ordenar por calidad de bitrate (tbr)
+                # Ordenamos por Bitrate (el video más pesado/mejor calidad)
                 sorted_formats = sorted(
                     [f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('url')],
                     key=lambda x: x.get('tbr') or 0,
@@ -79,13 +72,15 @@ async def descargar(url: str = Query(...)):
 
                     if not f_url: continue
 
-                    # Técnica para Instagram: No discriminamos por ID, solo buscamos la mejor calidad
+                    # --- LÓGICA NINJA PARA INSTAGRAM (SIMPLE Y DIRECTA) ---
                     if is_ig:
-                        video_url = f_url
-                        break
+                        if f.get('ext') == 'mp4' or 'mp4' in f_id:
+                            video_url = f_url
+                            break
                     
-                    # Técnica para TikTok: Limpieza total de residuos (Marca de Agua)
+                    # --- LÓGICA ROBUSTA PARA TIKTOK (FILTRADO ANTI-RESIDUO) ---
                     if is_tk:
+                        blacklist = ['watermark', 'download', 'lite', 'fixed', 'tier', 'fallback', 'small']
                         if 'no watermark' in note or 'nowatermark' in f_id:
                             video_url = f_url
                             break
@@ -93,7 +88,6 @@ async def descargar(url: str = Query(...)):
                             video_url = f_url
                             break
                 
-                # Fallback: Si nada funcionó, agarra el de mayor calidad disponible
                 if not video_url and sorted_formats:
                     video_url = sorted_formats[0]['url']
             else:
@@ -102,7 +96,7 @@ async def descargar(url: str = Query(...)):
             if not video_url:
                 raise HTTPException(status_code=404)
 
-            # --- HEADERS DE CAMUFLAJE DINÁMICO ---
+            # Headers dinámicos por plataforma
             headers = {
                 'User-Agent': UA_GLOBAL,
                 'Accept': '*/*',
@@ -111,13 +105,10 @@ async def descargar(url: str = Query(...)):
                 'Range': 'bytes=0-', 
             }
 
-            # Referer y Origin específicos para burlar el bloqueo de Kashimo (IG)
             if is_ig:
-                headers['Referer'] = 'https://www.instagram.com/'
-                headers['Origin'] = 'https://www.instagram.com/'
+                headers.update({'Referer': 'https://www.instagram.com/', 'Origin': 'https://www.instagram.com/'})
             elif is_tk:
-                headers['Referer'] = 'https://www.tiktok.com/'
-                headers['Origin'] = 'https://www.tiktok.com/'
+                headers.update({'Referer': 'https://www.tiktok.com/', 'Origin': 'https://www.tiktok.com/'})
 
             if info.get('http_headers'):
                 headers.update(info['http_headers'])
@@ -125,10 +116,7 @@ async def descargar(url: str = Query(...)):
             return StreamingResponse(
                 stream_video(video_url, headers, cookies),
                 media_type="video/mp4",
-                headers={
-                    "Content-Disposition": "attachment; filename=video_monstruo.mp4",
-                    "Accept-Ranges": "bytes"
-                }
+                headers={"Content-Disposition": "attachment; filename=video.mp4", "Accept-Ranges": "bytes"}
             )
         except Exception:
             raise HTTPException(status_code=500)
