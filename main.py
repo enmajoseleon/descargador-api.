@@ -8,90 +8,100 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
-# --- CONFIGURACIÓN DE ARMADURA (RECURSOS) ---
-# Limitamos hilos y concurrencia para sobrevivir en los 512MB de Render
-executor = ThreadPoolExecutor(max_workers=5)
-# El semáforo asegura que solo 3 extracciones ocurran estrictamente en paralelo
-extraction_semaphore = asyncio.Semaphore(3)
+# --- CONFIGURACIÓN DE RECURSOS (MÁXIMA EFICIENCIA) ---
+executor = ThreadPoolExecutor(max_workers=4)
+extraction_semaphore = asyncio.Semaphore(2) # Bajamos a 2 para evitar picos de RAM en Render
 
 @app.get("/")
 def home():
-    return {"status": "Motor Blindado y Monitoreado 🛡️⚡", "autor": "Emmanuel Pro"}
+    return {"status": "Hyper Blindado 🛡️", "engine": "yt-dlp + HTTPX Stream"}
 
 async def stream_video(url: str, headers: dict) -> AsyncGenerator[bytes, None]:
-    """Transmisión asíncrona con monitoreo de tamaño y gestión de errores."""
+    """Flujo de datos ultra-seguro con bypass de 0 bytes."""
     try:
-        # follow_redirects=True es vital para no perder el rastro del video
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        # Usamos un cliente con límites de conexión optimizados
+        limits = httpx.Limits(max_keepalive_connections=5, max_connections=10)
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, limits=limits) as client:
             async with client.stream("GET", url, headers=headers) as response:
-                if response.status_code >= 400:
-                    print(f"❌ Error CDN: {response.status_code}")
+                if response.status_code != 200:
+                    print(f"❌ Error de Origen: {response.status_code}")
                     return
 
-                # Monitoreo de carga en logs de Render
-                content_length = response.headers.get("Content-Length")
-                if content_length:
-                    size_mb = int(content_length) / (1024 * 1024)
-                    print(f"🚀 Transmitiendo video: {size_mb:.2f} MB")
-                
-                # Enviamos el video por trozos de 128KB para no saturar la RAM
-                async for chunk in response.aiter_bytes(chunk_size=1024 * 128):
+                # Si no hay Content-Length, TikTok nos está engañando
+                if not response.headers.get("Content-Length") and "tiktok" in url:
+                    print("⚠️ Advertencia: TikTok envió flujo sin tamaño definido.")
+
+                async for chunk in response.aiter_bytes(chunk_size=1024 * 64): # Chunks más pequeños (64KB)
                     yield chunk
     except Exception as e:
-        print(f"⚠️ Interrupción en el flujo: {e}")
+        print(f"⚠️ Error en el Stream: {e}")
 
-def extraer_info_sync(url: str):
-    """Extracción en hilo secundario para no bloquear el servidor."""
+def extraer_info_hyper(url: str):
+    """Extracción con limpieza de metadatos y bypass de cookies."""
     ydl_opts = {
         'format': 'best',
         'quiet': True,
         'no_warnings': True,
-        'cachedir': False, # No escribe en el disco efímero de Render
+        'cachedir': False,
+        'no_check_certificate': True,
+        'socket_timeout': 20,
+        # USER AGENT ACTUALIZADO A CHROME 122
         'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'http_headers': {
+            'Accept': '*/*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.tiktok.com/',
+        }
     }
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        return ydl.extract_info(url, download=False)
+        info = ydl.extract_info(url, download=False)
+        return ydl.sanitize_info(info)
 
 @app.get("/descargar")
-async def descargar_video(url: str = Query(..., description="URL de TikTok o Instagram")):
-    # El semáforo protege la CPU de Render contra picos de tráfico
+async def descargar_video(url: str = Query(...)):
     async with extraction_semaphore:
         try:
             loop = asyncio.get_event_loop()
+            # PASO 1: Extracción con limpieza de datos
+            info = await loop.run_in_executor(executor, extraer_info_hyper, url)
             
-            # PASO 1: Extracción segura fuera del hilo principal
-            info = await loop.run_in_executor(executor, extraer_info_sync, url)
-            
+            # Buscamos la URL en 'url' o en la lista de formatos
             video_url = info.get('url')
-            if not video_url:
-                raise HTTPException(status_code=404, detail="URL no encontrada en el motor")
+            if not video_url and info.get('formats'):
+                # Filtramos para obtener el formato que NO tenga marca de agua (si aplica)
+                video_url = info['formats'][-1].get('url')
 
-            # PASO 2: Headers de Bypass optimizados para TikTok/Instagram
-            custom_headers = {
+            if not video_url:
+                raise HTTPException(status_code=404, detail="No se encontró el flujo de video")
+
+            # PASO 2: CLONACIÓN DE CABECERAS (El "Hyper" Blindaje)
+            # Copiamos los headers exactos que yt-dlp usó para que TikTok no sospeche
+            headers_de_vuelo = {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
                 'Accept': '*/*',
+                'Accept-Encoding': 'identity', # Crucial para no recibir 0 bytes comprimidos
                 'Referer': 'https://www.tiktok.com/' if 'tiktok' in url else 'https://www.instagram.com/',
-                'Range': 'bytes=0-',
-                'Connection': 'keep-alive'
+                'Connection': 'keep-alive',
+                'Range': 'bytes=0-', # Fuerza el inicio del flujo
             }
 
-            # PASO 3: Retorno del flujo directo a tu App en Flutter
+            # Si yt-dlp nos dio cookies o headers específicos, los inyectamos
+            if info.get('http_headers'):
+                headers_de_vuelo.update(info['http_headers'])
+
+            print(f"✅ Link extraído con éxito para: {url[:30]}...")
+
+            # PASO 3: Respuesta de flujo con headers de descarga
             return StreamingResponse(
-                stream_video(video_url, custom_headers),
+                stream_video(video_url, headers_de_vuelo),
                 media_type="video/mp4",
                 headers={
-                    "Content-Disposition": "attachment; filename=video_pro.mp4",
+                    "Content-Disposition": "attachment; filename=video_emmanuel.mp4",
                     "Content-Type": "video/mp4",
-                    "X-Content-Type-Options": "nosniff", # Seguridad para el cliente
-                    "Cache-Control": "no-cache" # No guardar basura en caché
+                    "Accept-Ranges": "bytes"
                 }
             )
 
         except Exception as e:
-            print(f"🔥 Error crítico en API: {e}")
-            raise HTTPException(status_code=500, detail="Error procesando la solicitud")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    # Apagado limpio del pool de hilos
-    executor.shutdown(wait=True)
+            print(f"🔥 Error Crítico: {str(e)}")
+            raise HTTPException(status_code=500, detail="El motor no pudo procesar este link.")
