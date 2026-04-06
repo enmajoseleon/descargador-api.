@@ -60,35 +60,40 @@ async def descargar(url: str = Query(...)):
             video_url = None
             
             if 'formats' in info:
-                # 1. Búsqueda por nota explícita de 'No Watermark'
-                for f in reversed(info['formats']):
-                    note = str(f.get('format_note', '')).lower()
+                # --- EXORCISMO DE FORMATOS (EL CORTE FINAL) ---
+                blacklist = [
+                    'watermark', 'download', 'lite', 'fixed', 'tier', 
+                    'watermark_fixed', 'fallback', 'small', 'medium'
+                ]
+
+                # Ordenamos por calidad (Bitrate - tbr) de mayor a menor
+                # El video original siempre pesa más que el residuo pichirre
+                sorted_formats = sorted(
+                    [f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('url')],
+                    key=lambda x: x.get('tbr') or 0,
+                    reverse=True
+                )
+
+                for f in sorted_formats:
                     f_id = str(f.get('format_id', '')).lower()
+                    note = str(f.get('format_note', '')).lower()
+                    f_url = f.get('url')
+
+                    if not f_url: continue
+
+                    # 1. Si dice "no watermark", ganamos instantáneamente
                     if 'no watermark' in note or 'nowatermark' in f_id:
-                        video_url = f.get('url')
-                        if video_url: break
+                        video_url = f_url
+                        break
 
-                # 2. Si no hay nota, filtrado por Lista Negra Agresiva
-                if not video_url:
-                    # Lista negra para purgar el "Residuo Maldito" (Lite, Fixed, etc.)
-                    blacklist = ['watermark', 'download', 'lite', 'fixed', 'tier', 'watermark_fixed']
-                    
-                    for f in reversed(info['formats']):
-                        f_id = str(f.get('format_id', '')).lower()
-                        vcodec = f.get('vcodec', 'none')
-                        f_url = f.get('url')
-
-                        if vcodec == 'none' or not f_url or 'story' in f_id:
-                            continue
-
-                        if not any(x in f_id for x in blacklist):
-                            video_url = f_url
-                            break
+                    # 2. Si no está en la lista negra, es nuestra mejor opción pura
+                    if not any(x in f_id for x in blacklist) and not any(x in note for x in blacklist):
+                        video_url = f_url
+                        break
                 
-                # 3. Último recurso (Fallback)
-                if not video_url:
-                    v_only = [f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('url')]
-                    video_url = v_only[-1]['url'] if v_only else info.get('url')
+                # Fallback de emergencia
+                if not video_url and sorted_formats:
+                    video_url = sorted_formats[0]['url']
             else:
                 video_url = info.get('url')
 
@@ -110,7 +115,7 @@ async def descargar(url: str = Query(...)):
                 stream_video(video_url, headers, cookies),
                 media_type="video/mp4",
                 headers={
-                    "Content-Disposition": "attachment; filename=video.mp4",
+                    "Content-Disposition": "attachment; filename=video_pro.mp4",
                     "Accept-Ranges": "bytes"
                 }
             )
