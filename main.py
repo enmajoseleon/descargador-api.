@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 app = FastAPI()
 
+# --- RECURSOS PARA RENDER ---
 executor = ThreadPoolExecutor(max_workers=5)
 extraction_semaphore = asyncio.Semaphore(3)
 
@@ -59,22 +60,35 @@ async def descargar(url: str = Query(...)):
             video_url = None
             
             if 'formats' in info:
+                # 1. Búsqueda por nota explícita de 'No Watermark'
                 for f in reversed(info['formats']):
+                    note = str(f.get('format_note', '')).lower()
                     f_id = str(f.get('format_id', '')).lower()
-                    vcodec = f.get('vcodec', 'none')
-                    f_url = f.get('url')
+                    if 'no watermark' in note or 'nowatermark' in f_id:
+                        video_url = f.get('url')
+                        if video_url: break
 
-                    if vcodec == 'none' or not f_url or 'story' in f_id:
-                        continue
+                # 2. Si no hay nota, filtrado por Lista Negra Agresiva
+                if not video_url:
+                    # Lista negra para purgar el "Residuo Maldito" (Lite, Fixed, etc.)
+                    blacklist = ['watermark', 'download', 'lite', 'fixed', 'tier', 'watermark_fixed']
+                    
+                    for f in reversed(info['formats']):
+                        f_id = str(f.get('format_id', '')).lower()
+                        vcodec = f.get('vcodec', 'none')
+                        f_url = f.get('url')
 
-                    # Filtro estricto anti-residuos (Lite, Watermark, Fixed)
-                    if not any(x in f_id for x in ['watermark', 'download', 'lite', 'fixed']):
-                        video_url = f_url
-                        break
+                        if vcodec == 'none' or not f_url or 'story' in f_id:
+                            continue
+
+                        if not any(x in f_id for x in blacklist):
+                            video_url = f_url
+                            break
                 
+                # 3. Último recurso (Fallback)
                 if not video_url:
                     v_only = [f for f in info['formats'] if f.get('vcodec') != 'none' and f.get('url')]
-                    video_url = v_only[-1]['url'] if v_only else None
+                    video_url = v_only[-1]['url'] if v_only else info.get('url')
             else:
                 video_url = info.get('url')
 
